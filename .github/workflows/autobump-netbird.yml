@@ -1,0 +1,61 @@
+name: Auto-bump NetBird
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"   # daily at 06:00 UTC
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Get latest NetBird version
+        id: latest
+        run: |
+          VERSION=$(curl -s https://api.github.com/repos/netbirdio/netbird/releases/latest \
+            | jq -r '.tag_name' | sed 's/^v//')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Read current manifest version
+        id: current
+        run: |
+          VERSION=$(jq -r '.version' ./netbird.json)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Compare versions
+        id: compare
+        run: |
+          if [ "${{ steps.latest.outputs.version }}" = "${{ steps.current.outputs.version }}" ]; then
+            echo "update=false" >> $GITHUB_OUTPUT
+          else
+            echo "update=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update manifest
+        if: steps.compare.outputs.update == 'true'
+        run: |
+          jq '.version = "${{ steps.latest.outputs.version }}"' ./netbird.json \
+            > ./netbird.json.tmp
+          mv ./netbird.json.tmp ./netbird.json
+
+      - name: Commit and push
+        if: steps.compare.outputs.update == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add ./netbird.json
+          git commit -m "netbird: bump to ${{ steps.latest.outputs.version }}"
+          git push
+
+      - name: No update needed
+        if: steps.compare.outputs.update == 'false'
+        run: echo "NetBird already up to date"
+
