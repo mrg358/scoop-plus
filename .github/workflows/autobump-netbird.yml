@@ -3,7 +3,7 @@ name: Auto-bump NetBird
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * *"   # daily at 06:00 UTC
+    - cron: "0 6 * * *"
 
 permissions:
   contents: write
@@ -11,51 +11,95 @@ permissions:
 jobs:
   bump:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Get latest NetBird version
-        id: latest
+      - name: Fetch latest NetBird release metadata
+        id: release
         run: |
-          VERSION=$(curl -s https://api.github.com/repos/netbirdio/netbird/releases/latest \
-            | jq -r '.tag_name' | sed 's/^v//')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          RELEASE_JSON=$(curl -fsSL https://api.github.com/repos/netbirdio/netbird/releases/latest)
 
-      - name: Read current manifest version
-        id: current
-        run: |
-          VERSION=$(jq -r '.version' ./netbird.json)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          VERSION=$(echo "$RELEASE_JSON" | jq -r '.tag_name | ltrimstr("v")')
 
-      - name: Compare versions
+          # Extract hashes directly from the API response — no downloading needed.
+          # The digest field is "sha256:<hash>", so we strip the prefix.
+          AMD64_HASH=$(echo "$RELEASE_JSON" | jq -r '
+            .assets[]
+            | select(.name == "netbird_installer_\(env.VERSION)_windows_amd64.exe" )
+            | .digest | ltrimstr("sha256:")
+          ')
+          ARM64_HASH=$(echo "$RELEASE_JSON" | jq -r '
+            .assets[]
+            | select(.name == "netbird_installer_\(env.VERSION)_windows_arm64.exe")
+            | .digest | ltrimstr("sha256:")
+          ')
+
+          # Simpler approach: use shell variables instead of jq env interpolation
+          AMD64_HASH=$(echo "$RELEASE_JSON" | jq -r \
+            --arg name "netbird_installer_${VERSION}_windows_amd64.exe" \
+            '.assets[] | select(.name == $name) | .digest | ltrimstr("sha256:")')
+          ARM64_HASH=$(echo "$RELEASE_JSON" | jq -r \
+            --arg name "netbird_installer_${VERSION}_windows_arm64.exe" \
+            '.assets[] | select(.name == $name) | .digest | ltrimstr("sha256:")')
+
+          # Fail early if either hash is empty (asset name may have changed upstream)
+          if [ -z "$AMD64_HASH" ] || [ -z "$ARM64_HASH" ]; then
+            echo "ERROR: Could not find installer assets in release. Available assets:"
+            echo "$RELEASE_JSON" | jq -r '.assets[].name'
+            exit 1
+          fi
+
+          BASE="https://github.com/netbirdio/netbird/releases/download/v${VERSION}"
+          AMD64_URL="${BASE}/netbird_installer_${VERSION}_windows_amd64.exe#/dl.7z"
+          ARM64_URL="${BASE}/netbird_installer_${VERSION}_windows_arm64.exe#/dl.7z"
+
+          echo "version=$VERSION"       >> $GITHUB_OUTPUT
+          echo "amd64_hash=$AMD64_HASH" >> $GITHUB_OUTPUT
+          echo "arm64_hash=$ARM64_HASH" >> $GITHUB_OUTPUT
+          echo "amd64_url=$AMD64_URL"   >> $GITHUB_OUTPUT
+          echo "arm64_url=$ARM64_URL"   >> $GITHUB_OUTPUT
+
+      - name: Check if update is needed
         id: compare
         run: |
-          if [ "${{ steps.latest.outputs.version }}" = "${{ steps.current.outputs.version }}" ]; then
+          CURRENT=$(jq -r '.version' ./bucket/netbird.json)
+          LATEST="${{ steps.release.outputs.version }}"
+          if [ "$LATEST" = "$CURRENT" ]; then
             echo "update=false" >> $GITHUB_OUTPUT
+            echo "Already up to date ($CURRENT), nothing to do."
           else
             echo "update=true" >> $GITHUB_OUTPUT
+            echo "Updating $CURRENT → $LATEST"
           fi
 
       - name: Update manifest
         if: steps.compare.outputs.update == 'true'
         run: |
-          jq '.version = "${{ steps.latest.outputs.version }}"' ./netbird.json \
-            > ./netbird.json.tmp
-          mv ./netbird.json.tmp ./netbird.json
+          jq \
+            --arg version    "${{ steps.release.outputs.version }}"   \
+            --arg amd64_url  "${{ steps.release.outputs.amd64_url }}" \
+            --arg arm64_url  "${{ steps.release.outputs.arm64_url }}" \
+            --arg amd64_hash "${{ steps.release.outputs.amd64_hash }}" \
+            --arg arm64_hash "${{ steps.release.outputs.arm64_hash }}" \
+            '
+              .version = $version |
+              .architecture["64bit"].url  = $amd64_url  |
+              .architecture["64bit"].hash = $amd64_hash |
+              .architecture.arm64.url     = $arm64_url  |
+              .architecture.arm64.hash    = $arm64_hash
+            ' ./bucket/netbird.json > ./bucket/netbird.json.tmp
+          mv ./bucket/netbird.json.tmp ./bucket/netbird.json
+
+      - name: Verify manifest is valid JSON
+        if: steps.compare.outputs.update == 'true'
+        run: jq empty ./bucket/netbird.json && echo "Manifest JSON is valid"
 
       - name: Commit and push
         if: steps.compare.outputs.update == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add ./netbird.json
-          git commit -m "netbird: bump to ${{ steps.latest.outputs.version }}"
+          git add ./bucket/netbird.json
+          git commit -m "netbird: bump to ${{ steps.release.outputs.version }}"
           git push
-
-      - name: No update needed
-        if: steps.compare.outputs.update == 'false'
-        run: echo "NetBird already up to date"
-
