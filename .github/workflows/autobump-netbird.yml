@@ -63,7 +63,7 @@ jobs:
       - name: Check if update is needed
         id: compare
         run: |
-          CURRENT=$(jq -r '.version' ./bucket/netbird.json)
+          CURRENT=$(jq -r '.version' ./bucket/netbird-plus.json)
           LATEST="${{ steps.release.outputs.version }}"
           if [ "$LATEST" = "$CURRENT" ]; then
             echo "update=false" >> $GITHUB_OUTPUT
@@ -88,19 +88,19 @@ jobs:
               .architecture["64bit"].hash = $amd64_hash |
               .architecture.arm64.url     = $arm64_url  |
               .architecture.arm64.hash    = $arm64_hash
-            ' ./bucket/netbird.json > ./bucket/netbird.json.tmp
-          mv ./bucket/netbird.json.tmp ./bucket/netbird.json
+            ' ./bucket/netbird-plus.json > ./bucket/netbird-plus.json.tmp
+          mv ./bucket/netbird-plus.json.tmp ./bucket/netbird-plus.json
 
       - name: Verify manifest is valid JSON
         if: steps.compare.outputs.update == 'true'
-        run: jq empty ./bucket/netbird.json && echo "Manifest JSON is valid"
+        run: jq empty ./bucket/netbird-plus.json && echo "Manifest JSON is valid"
 
       - name: Commit and push
         if: steps.compare.outputs.update == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ./bucket/netbird.json
+          git add ./bucket/netbird-plus.json
           git commit -m "netbird: bump to ${{ steps.release.outputs.version }}"
           git pull --rebase
           git push
