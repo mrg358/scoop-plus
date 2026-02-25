@@ -1,4 +1,4 @@
-name: Auto-bump NetBird
+name: Auto-bump Beszel-Agent
 
 on:
   workflow_dispatch:
