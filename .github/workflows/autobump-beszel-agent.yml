@@ -1,0 +1,106 @@
+name: Auto-bump NetBird
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Fetch latest Beszel Agent release metadata
+        id: release
+        run: |
+          RELEASE_JSON=$(curl -fsSL https://api.github.com/repos/henrygd/beszel/releases/latest)
+
+          VERSION=$(echo "$RELEASE_JSON" | jq -r '.tag_name | ltrimstr("v")')
+
+          # Extract hashes directly from the API response — no downloading needed.
+          # The digest field is "sha256:<hash>", so we strip the prefix.
+          AMD64_HASH=$(echo "$RELEASE_JSON" | jq -r '
+            .assets[]
+            | select(.name == "beszel-agent_windows_amd64.zip" )
+            | .digest | ltrimstr("sha256:")
+          ')
+          ARM64_HASH=$(echo "$RELEASE_JSON" | jq -r '
+            .assets[]
+            | select(.name == "beszel-agent_windows_arm64.zip" )
+            | .digest | ltrimstr("sha256:")
+          ')
+
+          # Simpler approach: use shell variables instead of jq env interpolation
+          AMD64_HASH=$(echo "$RELEASE_JSON" | jq -r \
+            --arg name "beszel-agent_windows_amd64.zip" \
+            '.assets[] | select(.name == $name) | .digest | ltrimstr("sha256:")')
+          ARM64_HASH=$(echo "$RELEASE_JSON" | jq -r \
+            --arg name "beszel-agent_windows_arm64.zip" \
+            '.assets[] | select(.name == $name) | .digest | ltrimstr("sha256:")')
+
+          # Fail early if either hash is empty (asset name may have changed upstream)
+          if [ -z "$AMD64_HASH" ] || [ -z "$ARM64_HASH" ]; then
+            echo "ERROR: Could not find installer assets in release. Available assets:"
+            echo "$RELEASE_JSON" | jq -r '.assets[].name'
+            exit 1
+          fi
+
+          BASE="https://github.com/henrygd/beszel/releases/download/v${VERSION}"
+          AMD64_URL="${BASE}/beszel-agent_windows_amd64.zip#/dl.7z"
+          ARM64_URL="${BASE}/beszel-agent_windows_arm64.zip#/dl.7z"
+
+          echo "version=$VERSION"       >> $GITHUB_OUTPUT
+          echo "amd64_hash=$AMD64_HASH" >> $GITHUB_OUTPUT
+          echo "arm64_hash=$ARM64_HASH" >> $GITHUB_OUTPUT
+          echo "amd64_url=$AMD64_URL"   >> $GITHUB_OUTPUT
+          echo "arm64_url=$ARM64_URL"   >> $GITHUB_OUTPUT
+
+      - name: Check if update is needed
+        id: compare
+        run: |
+          CURRENT=$(jq -r '.version' ./bucket/beszel-agent-plus.json)
+          LATEST="${{ steps.release.outputs.version }}"
+          if [ "$LATEST" = "$CURRENT" ]; then
+            echo "update=false" >> $GITHUB_OUTPUT
+            echo "Already up to date ($CURRENT), nothing to do."
+          else
+            echo "update=true" >> $GITHUB_OUTPUT
+            echo "Updating $CURRENT → $LATEST"
+          fi
+
+      - name: Update manifest
+        if: steps.compare.outputs.update == 'true'
+        run: |
+          jq \
+            --arg version    "${{ steps.release.outputs.version }}"   \
+            --arg amd64_url  "${{ steps.release.outputs.amd64_url }}" \
+            --arg arm64_url  "${{ steps.release.outputs.arm64_url }}" \
+            --arg amd64_hash "${{ steps.release.outputs.amd64_hash }}" \
+            --arg arm64_hash "${{ steps.release.outputs.arm64_hash }}" \
+            '
+              .version = $version |
+              .architecture["64bit"].url  = $amd64_url  |
+              .architecture["64bit"].hash = $amd64_hash |
+              .architecture.arm64.url     = $arm64_url  |
+              .architecture.arm64.hash    = $arm64_hash
+            ' ./bucket/beszel-agent-plus.json > ./bucket/beszel-agent-plus.json.tmp
+          mv ./bucket/beszel-agent-plus.json.tmp ./bucket/beszel-agent-plus.json
+
+      - name: Verify manifest is valid JSON
+        if: steps.compare.outputs.update == 'true'
+        run: jq empty ./bucket/beszel-agent-plus.json && echo "Manifest JSON is valid"
+
+      - name: Commit and push
+        if: steps.compare.outputs.update == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ./bucket/beszel-agent-plus.json
+          git commit -m "beszel-agent: bump to ${{ steps.release.outputs.version }}"
+          git pull --rebase --strategy-option=theirs
+          git push
